@@ -1,0 +1,8 @@
+streamlit
+faiss-cpu
+sentence-transformers
+numpy
+firebase-admin
+bcrypt
+google-genai
+torch
