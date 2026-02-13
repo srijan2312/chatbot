@@ -32,7 +32,7 @@ API_KEY = os.getenv("GEMINI_API_KEY") or (st.secrets.get("GEMINI_API_KEY") if st
 HF_API_TOKEN = os.getenv("HF_API_TOKEN") or (st.secrets.get("HF_API_TOKEN") if st.secrets else None)
 HF_MODEL = os.getenv("HF_MODEL") or (st.secrets.get("HF_MODEL") if st.secrets else "HuggingFaceH4/zephyr-7b-beta")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or (st.secrets.get("GROQ_API_KEY") if st.secrets else None)
-GROQ_MODEL = os.getenv("GROQ_MODEL") or (st.secrets.get("GROQ_MODEL") if st.secrets else "llama3-8b-8192")
+GROQ_MODEL = os.getenv("GROQ_MODEL") or (st.secrets.get("GROQ_MODEL") if st.secrets else "llama-3.1-8b-instant")
 if not API_KEY:
     # app should still load if missing key — show warning later where generation happens
     genai_client = None
@@ -299,7 +299,7 @@ def generate_with_groq(prompt: str) -> str:
         "Content-Type": "application/json"
     }
     payload = {
-        "model": GROQ_MODEL or "llama3-8b-8192",
+        "model": GROQ_MODEL or "llama-3.1-8b-instant",
         "messages": [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": groq_prompt}
