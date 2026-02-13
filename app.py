@@ -2,6 +2,9 @@
 import os
 import json
 import re
+import time
+
+import requests
 from datetime import datetime
 
 import streamlit as st
@@ -26,6 +29,8 @@ from firebase_db import (
 # ---------------------------
 st.set_page_config(page_title="ChatDouble", page_icon="🤖", layout="wide")
 API_KEY = os.getenv("GEMINI_API_KEY") or (st.secrets.get("GEMINI_API_KEY") if st.secrets else None)
+HF_API_TOKEN = os.getenv("HF_API_TOKEN") or (st.secrets.get("HF_API_TOKEN") if st.secrets else None)
+HF_MODEL = os.getenv("HF_MODEL") or (st.secrets.get("HF_MODEL") if st.secrets else "HuggingFaceH4/zephyr-7b-beta")
 if not API_KEY:
     # app should still load if missing key — show warning later where generation happens
     genai_client = None
@@ -244,6 +249,39 @@ def allow_attempt(action: str, key: str):
     if not allowed:
         return False, f"Too many attempts. Try again in {retry_in} seconds."
     return True, ""
+
+
+def generate_with_hf(prompt: str) -> str:
+    headers = {"Content-Type": "application/json"}
+    if HF_API_TOKEN:
+        headers["Authorization"] = f"Bearer {HF_API_TOKEN}"
+
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "max_new_tokens": 200,
+            "temperature": 0.7,
+            "return_full_text": False
+        }
+    }
+    url = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        if resp.status_code == 503:
+            return "⚠️ Model is loading on Hugging Face. Try again in 30-60 seconds."
+        if resp.status_code == 429:
+            return "⚠️ Hugging Face rate limit reached. Please try again later."
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict) and data.get("error"):
+            return f"⚠️ HF error: {data['error']}"
+        if isinstance(data, list) and data:
+            text = data[0].get("generated_text", "")
+            return text.strip() or "⚠️ Empty HF response."
+        return "⚠️ Unexpected HF response."
+    except requests.RequestException as exc:
+        return f"⚠️ HF request failed: {exc}"
     prompt = f"""Take these example messages from a single person and write a 1-2 sentence persona description capturing their tone, slang, and typical phrases.
 
 Examples:
@@ -463,7 +501,7 @@ else:
         user_bots = get_user_bots(user)
 
         if not genai_client:
-            st.warning("Gemini API key not set. Add GEMINI_API_KEY in Streamlit secrets to enable chat.")
+            st.warning("Gemini API key not set. Chat will use Hugging Face fallback if configured.")
         if not user_bots:
             st.info("No bots yet. Create one in Manage Bots tab.")
         else:
@@ -763,7 +801,7 @@ User: {user_msg}
 {selected_bot}:
 """
                     if not genai_client:
-                        reply = "⚠️ Gemini API key not set. Add GEMINI_API_KEY to environment or Streamlit secrets."
+                        reply = generate_with_hf(prompt)
                     else:
                         reply = "..."
 
@@ -775,17 +813,25 @@ User: {user_msg}
                             reply = getattr(resp, "text", None) or (
                                 resp.get("message", {}).get("content", "") if isinstance(resp, dict) else ""
                             ) or "⚠️Offline (Text after sometime)"
-                        except Exception:
-                            try:
-                                resp = genai_client.models.generate_content(
-                                    model="gemini-2.0-flash",
-                                    contents=prompt
-                                )
-                                reply = getattr(resp, "text", None) or (
-                                    resp.get("message", {}).get("content", "") if isinstance(resp, dict) else ""
-                                ) or "⚠️Offline (Text after sometime)"
-                            except Exception as e:
-                                reply = f"⚠️Offline (Try after sometime): {e}"
+                        except Exception as e:
+                            msg = str(e)
+                            if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
+                                reply = generate_with_hf(prompt)
+                            else:
+                                try:
+                                    resp = genai_client.models.generate_content(
+                                        model="gemini-2.0-flash",
+                                        contents=prompt
+                                    )
+                                    reply = getattr(resp, "text", None) or (
+                                        resp.get("message", {}).get("content", "") if isinstance(resp, dict) else ""
+                                    ) or "⚠️Offline (Text after sometime)"
+                                except Exception as e2:
+                                    msg2 = str(e2)
+                                    if "RESOURCE_EXHAUSTED" in msg2 or "429" in msg2:
+                                        reply = generate_with_hf(prompt)
+                                    else:
+                                        reply = f"⚠️Offline (Try after sometime): {e2}"
 
                     st.session_state[chat_key][-1]["bot"] = reply
                     st.session_state[chat_key][-1]["ts"] = datetime.now().strftime("%I:%M %p")
