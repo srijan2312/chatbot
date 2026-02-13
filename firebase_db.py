@@ -1,3 +1,4 @@
+import time
 import bcrypt
 from firebase_config import db, FIREBASE_CONFIGURED, FIREBASE_CONFIG_ERROR
 
@@ -5,6 +6,7 @@ from firebase_config import db, FIREBASE_CONFIGURED, FIREBASE_CONFIG_ERROR
 # 🔖 Firestore Collections
 # =========================================================
 USERS_COLLECTION = "users"
+RATE_LIMITS_COLLECTION = "rate_limits"
 
 # =========================================================
 # 👤 Authentication Functions
@@ -46,6 +48,27 @@ def login_user(username: str, password: str) -> bool:
         return False
 
     return bcrypt.checkpw(password.encode(), stored.encode())
+
+
+def check_rate_limit(action: str, key: str, max_attempts: int, window_seconds: int):
+    _require_db()
+    if not key:
+        return True, 0
+    now = int(time.time())
+    cutoff = now - window_seconds
+    doc_id = f"{action}:{key}".lower()
+    doc_ref = db.collection(RATE_LIMITS_COLLECTION).document(doc_id)
+    doc = doc_ref.get()
+    attempts = []
+    if doc.exists:
+        attempts = doc.to_dict().get("attempts", []) or []
+    attempts = [ts for ts in attempts if isinstance(ts, int) and ts >= cutoff]
+    if len(attempts) >= max_attempts:
+        retry_in = window_seconds - (now - min(attempts))
+        return False, max(1, retry_in)
+    attempts.append(now)
+    doc_ref.set({"attempts": attempts, "updated_at": now, "key": key, "action": action})
+    return True, 0
 
 
 # =========================================================
@@ -166,3 +189,17 @@ def load_chat_history_cloud(user: str, bot: str) -> list:
     if doc.exists:
         return doc.to_dict().get("history", [])
     return []
+
+
+def delete_user_and_data(username: str) -> None:
+    _require_db()
+    user_ref = db.collection(USERS_COLLECTION).document(username)
+    for subcollection in ["bots", "chats"]:
+        docs = user_ref.collection(subcollection).stream()
+        for doc in docs:
+            doc.reference.delete()
+    user_ref.delete()
+
+    rate_docs = db.collection(RATE_LIMITS_COLLECTION).where("key", "==", username).stream()
+    for doc in rate_docs:
+        doc.reference.delete()

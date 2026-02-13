@@ -1,6 +1,7 @@
 # app.py — complete copy-paste replacement
 import os
 import json
+import re
 from datetime import datetime
 
 import streamlit as st
@@ -16,7 +17,8 @@ from firebase_config import FIREBASE_CONFIGURED, FIREBASE_CONFIG_ERROR
 from firebase_db import (
     get_user_bots, add_bot, delete_bot, update_bot, update_bot_persona,
     register_user, login_user, get_bot_file,
-    save_chat_history_cloud, load_chat_history_cloud
+    save_chat_history_cloud, load_chat_history_cloud,
+    check_rate_limit, delete_user_and_data
 )
 
 # ---------------------------
@@ -31,6 +33,10 @@ else:
     genai_client = genai.Client(api_key=API_KEY)
 
 os.makedirs("chats", exist_ok=True)
+
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME") or (st.secrets.get("ADMIN_USERNAME") if st.secrets else None)
+RATE_LIMIT_MAX = 10
+RATE_LIMIT_WINDOW_SECONDS = 15 * 60
 
 if not FIREBASE_CONFIGURED:
     st.error(
@@ -214,6 +220,30 @@ def generate_persona(text_examples: str) -> str:
     """
     if not text_examples or not genai_client:
         return ""
+
+
+def validate_password(password: str):
+    if len(password) < 6:
+        return "Password must be at least 6 characters."
+    if not re.search(r"[a-z]", password):
+        return "Password must include a lowercase letter."
+    if not re.search(r"[A-Z]", password):
+        return "Password must include an uppercase letter."
+    if not re.search(r"\d", password):
+        return "Password must include a number."
+    if not re.search(r"[^A-Za-z0-9]", password):
+        return "Password must include a symbol."
+    return ""
+
+
+def allow_attempt(action: str, key: str):
+    try:
+        allowed, retry_in = check_rate_limit(action, key, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SECONDS)
+    except Exception as exc:
+        return False, f"Rate limit error: {exc}"
+    if not allowed:
+        return False, f"Too many attempts. Try again in {retry_in} seconds."
+    return True, ""
     prompt = f"""Take these example messages from a single person and write a 1-2 sentence persona description capturing their tone, slang, and typical phrases.
 
 Examples:
@@ -277,7 +307,7 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("🔐 Account")
     if not st.session_state.logged_in:
-        mode = st.radio("", ["Login", "Register"], index=0)
+        mode = st.radio("Auth mode", ["Login", "Register"], index=0, label_visibility="collapsed")
         username_input = st.text_input("Username", key="sb_user")
         password_input = st.text_input("Password", type="password", key="sb_pass")
         if st.button(mode):
@@ -285,6 +315,10 @@ with st.sidebar:
                 if not username_input.strip() or not password_input.strip():
                     st.error("Enter both fields.")
                 else:
+                    allowed, msg = allow_attempt("login", username_input.strip())
+                    if not allowed:
+                        st.error(msg)
+                        st.stop()
                     ok = False
                     try:
                         ok = login_user(username_input, password_input)
@@ -299,6 +333,17 @@ with st.sidebar:
                     else:
                         st.error("Invalid credentials.")
             else:
+                if not username_input.strip() or not password_input.strip():
+                    st.error("Enter both fields.")
+                    st.stop()
+                pw_error = validate_password(password_input)
+                if pw_error:
+                    st.error(pw_error)
+                    st.stop()
+                allowed, msg = allow_attempt("register", username_input.strip())
+                if not allowed:
+                    st.error(msg)
+                    st.stop()
                 try:
                     ok = register_user(username_input, password_input)
                 except Exception as e:
@@ -314,6 +359,36 @@ with st.sidebar:
             st.session_state.logged_in = False
             st.session_state.username = ""
             st.rerun()
+        with st.expander("Delete my account"):
+            st.warning("This permanently deletes your account, bots, and chat history.")
+            confirm_self_delete = st.checkbox("I understand this is permanent", key="self_delete_confirm")
+            if st.button("Delete my account", key="self_delete_btn"):
+                if confirm_self_delete:
+                    try:
+                        delete_user_and_data(st.session_state.username)
+                        st.session_state.logged_in = False
+                        st.session_state.username = ""
+                        st.success("Account deleted.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Delete error: {e}")
+                else:
+                    st.error("Please confirm the deletion.")
+        if ADMIN_USERNAME and st.session_state.username == ADMIN_USERNAME:
+            with st.expander("Admin: Delete user"):
+                target_user = st.text_input("Username to delete", key="admin_delete_user")
+                confirm_admin_delete = st.checkbox("Confirm delete", key="admin_delete_confirm")
+                if st.button("Delete user", key="admin_delete_btn"):
+                    if not target_user.strip():
+                        st.error("Enter a username.")
+                    elif not confirm_admin_delete:
+                        st.error("Please confirm the deletion.")
+                    else:
+                        try:
+                            delete_user_and_data(target_user.strip())
+                            st.success("User deleted.")
+                        except Exception as e:
+                            st.error(f"Admin delete error: {e}")
     st.markdown("---")
     st.markdown("<div class='small-muted'>Pro tip: manage bots and upload files inside the Manage tab (no sidebar actions required).</div>", unsafe_allow_html=True)
 
@@ -346,19 +421,35 @@ if not st.session_state.logged_in:
         cola, colb = st.columns(2)
         with cola:
             if st.button("Login", key="home_login_btn"):
-                if login_user(h_user, h_pass):
-                    st.session_state.logged_in = True
-                    st.session_state.username = h_user
-                    st.success("Logged in.")
-                    st.rerun()
+                if not h_user.strip() or not h_pass.strip():
+                    st.error("Enter both fields.")
                 else:
-                    st.error("Invalid credentials.")
+                    allowed, msg = allow_attempt("login", h_user.strip())
+                    if not allowed:
+                        st.error(msg)
+                    elif login_user(h_user, h_pass):
+                        st.session_state.logged_in = True
+                        st.session_state.username = h_user
+                        st.success("Logged in.")
+                        st.rerun()
+                    else:
+                        st.error("Invalid credentials.")
         with colb:
             if st.button("Register", key="home_reg_btn"):
-                if register_user(h_user, h_pass):
-                    st.success("Registered! Now login.")
+                if not h_user.strip() or not h_pass.strip():
+                    st.error("Enter both fields.")
                 else:
-                    st.error("Username exists.")
+                    pw_error = validate_password(h_pass)
+                    if pw_error:
+                        st.error(pw_error)
+                    else:
+                        allowed, msg = allow_attempt("register", h_user.strip())
+                        if not allowed:
+                            st.error(msg)
+                        elif register_user(h_user, h_pass):
+                            st.success("Registered! Now login.")
+                        else:
+                            st.error("Username exists.")
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -371,6 +462,8 @@ else:
         user = st.session_state.username
         user_bots = get_user_bots(user)
 
+        if not genai_client:
+            st.warning("Gemini API key not set. Add GEMINI_API_KEY in Streamlit secrets to enable chat.")
         if not user_bots:
             st.info("No bots yet. Create one in Manage Bots tab.")
         else:
@@ -593,7 +686,7 @@ else:
 
                 with inp_col:
                     user_msg = st.text_input(
-                        "",
+                        "Message",
                         key="chat_input_box",
                         label_visibility="collapsed",
                         placeholder="Type…"
