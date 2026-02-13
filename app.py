@@ -290,15 +290,19 @@ def generate_with_groq(prompt: str) -> str:
     if not GROQ_API_KEY:
         return "⚠️ Groq API key not set. Add GROQ_API_KEY in Streamlit secrets."
 
+    groq_prompt = prompt
+    if len(groq_prompt) > 12000:
+        groq_prompt = groq_prompt[-12000:]
+
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
     payload = {
-        "model": GROQ_MODEL,
+        "model": GROQ_MODEL or "llama3-8b-8192",
         "messages": [
             {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt}
+            {"role": "user", "content": groq_prompt}
         ],
         "temperature": 0.7,
         "max_tokens": 200
@@ -313,6 +317,8 @@ def generate_with_groq(prompt: str) -> str:
         )
         if resp.status_code == 429:
             return "⚠️ Groq rate limit reached. Please try again later."
+        if resp.status_code in (400, 401, 403):
+            return f"⚠️ Groq error: {resp.text}"
         resp.raise_for_status()
         data = resp.json()
         choices = data.get("choices", []) if isinstance(data, dict) else []
