@@ -31,6 +31,8 @@ st.set_page_config(page_title="ChatDouble", page_icon="🤖", layout="wide")
 API_KEY = os.getenv("GEMINI_API_KEY") or (st.secrets.get("GEMINI_API_KEY") if st.secrets else None)
 HF_API_TOKEN = os.getenv("HF_API_TOKEN") or (st.secrets.get("HF_API_TOKEN") if st.secrets else None)
 HF_MODEL = os.getenv("HF_MODEL") or (st.secrets.get("HF_MODEL") if st.secrets else "HuggingFaceH4/zephyr-7b-beta")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") or (st.secrets.get("GROQ_API_KEY") if st.secrets else None)
+GROQ_MODEL = os.getenv("GROQ_MODEL") or (st.secrets.get("GROQ_MODEL") if st.secrets else "llama3-8b-8192")
 if not API_KEY:
     # app should still load if missing key — show warning later where generation happens
     genai_client = None
@@ -282,6 +284,44 @@ def generate_with_hf(prompt: str) -> str:
         return "⚠️ Unexpected HF response."
     except requests.RequestException as exc:
         return f"⚠️ HF request failed: {exc}"
+
+
+def generate_with_groq(prompt: str) -> str:
+    if not GROQ_API_KEY:
+        return "⚠️ Groq API key not set. Add GROQ_API_KEY in Streamlit secrets."
+
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.7,
+        "max_tokens": 200
+    }
+
+    try:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+        if resp.status_code == 429:
+            return "⚠️ Groq rate limit reached. Please try again later."
+        resp.raise_for_status()
+        data = resp.json()
+        choices = data.get("choices", []) if isinstance(data, dict) else []
+        if not choices:
+            return "⚠️ Empty Groq response."
+        text = choices[0].get("message", {}).get("content", "")
+        return text.strip() or "⚠️ Empty Groq response."
+    except requests.RequestException as exc:
+        return f"⚠️ Groq request failed: {exc}"
     prompt = f"""Take these example messages from a single person and write a 1-2 sentence persona description capturing their tone, slang, and typical phrases.
 
 Examples:
@@ -501,7 +541,7 @@ else:
         user_bots = get_user_bots(user)
 
         if not genai_client:
-            st.warning("Gemini API key not set. Chat will use Hugging Face fallback if configured.")
+            st.warning("Gemini API key not set. Chat will use Groq/HF fallback if configured.")
         if not user_bots:
             st.info("No bots yet. Create one in Manage Bots tab.")
         else:
@@ -801,7 +841,7 @@ User: {user_msg}
 {selected_bot}:
 """
                     if not genai_client:
-                        reply = generate_with_hf(prompt)
+                        reply = generate_with_groq(prompt) if GROQ_API_KEY else generate_with_hf(prompt)
                     else:
                         reply = "..."
 
@@ -816,7 +856,7 @@ User: {user_msg}
                         except Exception as e:
                             msg = str(e)
                             if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
-                                reply = generate_with_hf(prompt)
+                                reply = generate_with_groq(prompt) if GROQ_API_KEY else generate_with_hf(prompt)
                             else:
                                 try:
                                     resp = genai_client.models.generate_content(
@@ -829,7 +869,7 @@ User: {user_msg}
                                 except Exception as e2:
                                     msg2 = str(e2)
                                     if "RESOURCE_EXHAUSTED" in msg2 or "429" in msg2:
-                                        reply = generate_with_hf(prompt)
+                                        reply = generate_with_groq(prompt) if GROQ_API_KEY else generate_with_hf(prompt)
                                     else:
                                         reply = f"⚠️Offline (Try after sometime): {e2}"
 
